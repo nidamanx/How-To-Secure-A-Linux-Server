@@ -24,7 +24,7 @@ An evolving how-to guide for securing a Linux server that, hopefully, also teach
   - [Pre/Post Installation Requirements](#prepost-installation-requirements)
   - [Other Important Notes](#other-important-notes)
 - [The SSH Server](#the-ssh-server)
-  - [Important Not Before You Make SSH Changes](#important-not-before-you-make-ssh-changes)
+  - [Important Note Before You Make SSH Changes](#important-note-before-you-make-ssh-changes)
   - [SSH Public/Private Keys](#ssh-publicprivate-keys)
   - [Create SSH Group For AllowGroups](#create-ssh-group-for-allowgroups)
   - [Secure `/etc/ssh/sshd_config`](#secure-etcsshsshd_config)
@@ -240,7 +240,7 @@ Installing Linux is out-of-scope for this guide because each distribution does i
 1. boot your server from your install medium
 1. follow the prompts to install
 
-Where applicable, use the expert install option so you have tighter control of what is running on your server. **Only install what you absolutely need.** I, personally, do not install anything other than SSH.
+Where applicable, use the expert install option so you have tighter control of what is running on your server. **Only install what you absolutely need.** I, personally, do not install anything other than SSH. Also, tick the Disk Encryption option.
 
 ([Table of Contents](#table-of-contents))
 
@@ -271,9 +271,9 @@ Where applicable, use the expert install option so you have tighter control of w
 
 ## The SSH Server
 
-### Important Not Before You Make SSH Changes
+### Important Note Before You Make SSH Changes
 
-It is highly advised you keep a 2nd terminal open to your server **before you make and apply SSH configuration changes**. This way if you lock yourself out of your 1st terminal session, you still have one sesssion connected so you can fix it.
+It is highly advised you keep a 2nd terminal open to your server **before you make and apply SSH configuration changes**. This way if you lock yourself out of your 1st terminal session, you still have one session connected so you can fix it.
 
 Thank you to [Sonnenbrand](https://github.com/Sonnenbrand) for this [idea](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/issues/56).
 
@@ -292,7 +292,7 @@ Check the references below for more details but, at a high level, public/private
 
 For SSH, a public and private key is created on the client. You want to keep both keys secure, especially the private key. Even though the public key is meant to be public, it is wise to make sure neither keys fall in the wrong hands.
 
-When you connect to an SSH server, SSH will look for a public key that matches the client you're connecting from in the file `~/.ssh/authorized_keys` on the server you're connecting to. Notice the file is in the **home folder** of the ID you're trying to connect to. So, after creating the public key, you need to append it to `~/.ssh/authorized_keys`. One approach is to copy it to a USB stick and physically transfer it to the server. Anther approach is to use use [`ssh-copy-id`](https://www.ssh.com/ssh/copy-id) to transfer and append the public key.
+When you connect to an SSH server, SSH will look for a public key that matches the client you're connecting from in the file `~/.ssh/authorized_keys` on the server you're connecting to. Notice the file is in the **home folder** of the ID you're trying to connect to. So, after creating the public key, you need to append it to `~/.ssh/authorized_keys`. One approach is to copy it to a USB stick and physically transfer it to the server. Another approach is to use use [`ssh-copy-id`](https://www.ssh.com/ssh/copy-id) to transfer and append the public key.
 
 After the keys have been created and the public key has been appended to `~/.ssh/authorized_keys` on the host, SSH uses the public and private keys to verify identity and then establish a secure connection. How identity is verified is a complicated process but [Digital Ocean](https://www.digitalocean.com/community/tutorials/understanding-the-ssh-encryption-and-connection-process) has a very nice write-up of how it works. At a high level, identity is verified by the server encrypting a challenge message with the public key, then sending it to the client. If the client cannot decrypt the challenge message with the private key, the identity can't be verified and a connection will not be established.
 
@@ -393,7 +393,7 @@ To make it easy to control who can SSH to the server. By using a group, we can q
 
 #### How It Works
 
-We will use the [AllowGroups option](#AllowGroups) in SSH's configuration file [`/etc/ssh/sshd_config`](#secure-etcsshsshd_config). to tell the SSH server to only allow users to SSH in if they are a member of a certain UNIX group. Anyone not in the group will not be able to SSH in.
+We will use the [AllowGroups option](#AllowGroups) in SSH's configuration file [`/etc/ssh/sshd_config`](#secure-etcsshsshd_config) to tell the SSH server to only allow users to SSH in if they are a member of a certain UNIX group. Anyone not in the group will not be able to SSH in.
 
 #### Goals
 
@@ -884,7 +884,7 @@ Browsers (even more the Closed Source ones) and eMail Clients are highly suggest
 
 #### Goals
 
-- confine applications in a jail (few safe directories) and block access to the resto of the system
+- confine applications in a jail (few safe directories) and block access to the rest of the system
 
 #### References
 
@@ -914,13 +914,13 @@ Browsers (even more the Closed Source ones) and eMail Clients are highly suggest
     sudo ln -s /usr/bin/firejail /usr/local/bin/thunderbird
     ```
 
-3. Run the application as usual (via terminal or launcher and check if is runnung in a jail:
+3. Run the application as usual (via terminal or launcher and check if is running in a jail):
 
     ``` bash
     firejail --list
     ```
 
-4. Allow a sandboxed app to run again as it wase before (example: firefox)
+4. Allow a sandboxed app to run again as it was before (example: firefox)
 
     ``` bash
     sudo rm /usr/local/bin/firefox
