@@ -40,11 +40,13 @@ An evolving how-to guide for securing a Linux server that, hopefully, also teach
   - [Force Accounts To Use Secure Passwords](#force-accounts-to-use-secure-passwords)
   - [Automatic Security Updates and Alerts](#automatic-security-updates-and-alerts)
   - [More Secure Random Entropy Pool (WIP)](#more-secure-random-entropy-pool-wip)
-  - [Add Panic/Secondary/Fake password Login Security System](#add-panic-secondary-fake-password-login-security-system)
+  - [Add Panic/Secondary/Fake password Login Security System](#add-panicsecondaryfake-password-login-security-system)
 - [The Network](#the-network)
   - [Firewall With UFW (Uncomplicated Firewall)](#firewall-with-ufw-uncomplicated-firewall)
+  - [Docker And UFW](#docker-and-ufw)
   - [iptables Intrusion Detection And Prevention with PSAD](#iptables-intrusion-detection-and-prevention-with-psad)
-  - [Application Intrusion Detection And Prevention With Fail2Ban](#application-intrusion-detection-and-prevention-with-fail2ban)
+  - [Application Intrusion Detection And Prevention With Fail2Ban](#application-intrusion-detection-and-prevention-with-fail2ban) 
+  - [Application Intrusion Detection And Prevention With CrowdSec](#application-intrusion-detection-and-prevention-with-crowdsec)
 - [The Auditing](#the-auditing)
   - [File/Folder Integrity Monitoring With AIDE (WIP)](#filefolder-integrity-monitoring-with-aide-wip)
   - [Anti-Virus Scanning With ClamAV (WIP)](#anti-virus-scanning-with-clamav-wip)
@@ -56,7 +58,7 @@ An evolving how-to guide for securing a Linux server that, hopefully, also teach
   - [OSSEC - Host Intrusion Detection](#ossec---host-intrusion-detection)
 - [The Danger Zone](#the-danger-zone)
 - [The Miscellaneous](#the-miscellaneous)
-  - [MSMTP (Simple Sendmail) with Google](#msmtp-alternative)
+  - [MSMTP (Simple Sendmail) with Google](#the-simple-way-with-msmtp)
   - [Gmail and Exim4 As MTA With Implicit TLS](#gmail-and-exim4-as-mta-with-implicit-tls)
   - [Separate iptables Log File](#separate-iptables-log-file)
 - [Left Over](#left-over)
@@ -117,6 +119,7 @@ There are many guides provided by experts, industry leaders, and the distributio
 - https://news.ycombinator.com/item?id=19178964
 - https://wiki.archlinux.org/index.php/Security - many folks have also recommended this one
 - https://securecompliance.co/linux-server-hardening-checklist/
+- [VPS-SECURE](https://github.com/rockballslab/vps-secure) - One-command Ubuntu 24.04 VPS hardening: SSH key-only on 2222, CrowdSec IPS, Endlessh honeypot, UFW with Docker bypass fixed, kernel hardening, AIDE/rkhunter/auditd, Telegram alerts.
 
 ([Table of Contents](#table-of-contents))
 
@@ -515,8 +518,10 @@ SSH is a door into your server. This is especially true if you are opening ports
 
 1. Edit `/etc/ssh/sshd_config` then find and edit or add these settings that should be applied regardless of your configuration/setup:
 
-    **Note**: SSH does not like duplicate contradicting settings. For example, if you have `ChallengeResponseAuthentication no` and then `ChallengeResponseAuthentication yes`, SSH will respect the first one and ignore the second. Your `/etc/ssh/sshd_config` file may already have some of the settings/lines below. To avoid issues you will need to manually go through your `/etc/ssh/sshd_config` file and address any duplicate contradicting settings. 
+    **Note**: SSH does not like duplicate contradicting settings. For example, if you have `KbdInteractiveAuthentication no` and then `KbdInteractiveAuthentication yes`, SSH will respect the first one and ignore the second. Your `/etc/ssh/sshd_config` file may already have some of the settings/lines below. To avoid issues you will need to manually go through your `/etc/ssh/sshd_config` file and address any duplicate contradicting settings.
 
+	**Note:** If you are running OpenSSH 9.1 or later, uncomment the `RequiredRSASize 3072` line in the configuration below. This enforces a minimum RSA key size of 3072 bits and will reject smaller RSA keys during authentication. This only affects RSA keys. If you use ED25519 or ECDSA keys, you are not affected. You can check your key type and size with `ssh-keygen -l -f ~/.ssh/id_rsa`. On older OpenSSH versions, leave the line commented out as it will prevent sshd from starting.
+   
     ```
     ########################################################################################################
     # start settings from https://infosec.mozilla.org/guidelines/openssh#modern-openssh-67 as of 2019-01-01
@@ -551,9 +556,6 @@ SSH is a door into your server. This is especially true if you are opening ports
     # Log sftp level file access (read/write/etc.) that would not be easily logged otherwise.
     Subsystem sftp  internal-sftp -f AUTHPRIV -l INFO
 
-    # only use the newer, more secure protocol
-    Protocol 2
-
     # disable X11 forwarding as X11 is very insecure
     # you really shouldn't be running X on a server anyway
     X11Forwarding no
@@ -573,16 +575,27 @@ SSH is a door into your server. This is especially true if you are opening ports
     # verify hostname matches IP
     UseDNS yes
 
-    Compression no
+    # OpenSSH only supports delayed (post-authentication) compression since
+    # 6.7, and removed pre-auth compression support entirely in 7.4 (2016),
+    # so the old compression-oracle attack surface this setting guarded
+    # against no longer exists on any currently supported OpenSSH version
+    Compression yes
+    
+    # TCP keepalive is spoofable (runs outside the encrypted channel)
+	# Use ClientAlive instead (runs inside the encrypted channel)
     TCPKeepAlive no
+    
     AllowAgentForwarding no
     PermitRootLogin no
 
     # don't allow .rhosts or /etc/hosts.equiv
     HostbasedAuthentication no
 
-    # https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/issues/115
-    HashKnownHosts yes
+    # OpenSSH 9.1 and later
+    # Enforce a minimum RSA key size of 3072 bits
+    # https://www.keylength.com/en/compare/
+    # RequiredRSASize 3072
+
     ```
 
 1. Then **find and edit or add** these settings, and set values as per your requirements:
@@ -590,13 +603,13 @@ SSH is a door into your server. This is especially true if you are opening ports
     |Setting|Valid Values|Example|Description|Notes|
     |--|--|--|--|--|
     |<a name="AllowGroups"></a>**AllowGroups**|local UNIX group name|`AllowGroups sshusers`|group to allow SSH access to||
-    |**ClientAliveCountMax**|number|`ClientAliveCountMax 0`|maximum number of client alive messages sent without response||
-    |**ClientAliveInterval**|number of seconds|`ClientAliveInterval 300`|timeout in seconds before a response request||
+    |**ClientAliveCountMax**|number|`ClientAliveCountMax 3`|maximum number of client alive messages sent without response||
+    |**ClientAliveInterval**|number of seconds|`ClientAliveInterval 15`|timeout in seconds before a response request||
     |**ListenAddress**|space separated list of local addresses|<ul><li>`ListenAddress 0.0.0.0`</li><li>`ListenAddress 192.168.1.100`</li></ul>|local addresses `sshd` should listen on|See [Issue #1](https://github.com/imthenachoman/How-To-Secure-A-Linux-Server/issues/1) for important details.|
     |**LoginGraceTime**|number of seconds|`LoginGraceTime 30`|time in seconds before login times-out||
     |**MaxAuthTries**|number|`MaxAuthTries 2`|maximum allowed attempts to login||
     |**MaxSessions**|number|`MaxSessions 2`|maximum number of open sessions||
-    |**MaxStartups**|number|`MaxStartups 2`|maximum number of login sessions||
+    |**MaxStartups**|number or `start:rate:full`|`MaxStartups 10:30:60`|maximum number of unauthenticated SSH connections||
     |<a name="PasswordAuthentication"></a>**PasswordAuthentication**|`yes` or `no`|`PasswordAuthentication no`|if login with a password is allowed||
     |**Port**|any open/available port number|`Port 22`|port that `sshd` should listen on||
 
@@ -608,10 +621,16 @@ SSH is a door into your server. This is especially true if you are opening ports
     awk 'NF && $1!~/^(#|HostKey)/{print $1}' /etc/ssh/sshd_config | sort | uniq -c | grep -v ' 1 '
     ```
 
+1. Validate the OpenSSH server configuration before restarting:
+
+    ``` bash
+    sudo sshd -t
+    ```
+
 1. Restart ssh:
 
     ``` bash
-    sudo service sshd restart
+    sudo service ssh restart
     ```
 
 1. You can check verify the configurations worked with `sshd -T` and verify the output:
@@ -630,8 +649,8 @@ SSH is a door into your server. This is especially true if you are opening ports
     > x11displayoffset 10
     > maxauthtries 2
     > maxsessions 2
-    > clientaliveinterval 300
-    > clientalivecountmax 0
+    > clientaliveinterval 15
+    > clientalivecountmax 3
     > streamlocalbindmask 0177
     > permitrootlogin no
     > ignorerhosts yes
@@ -687,7 +706,7 @@ The Diffie-Hellman algorithm is used by SSH to establish a secure connection. Th
 
 #### Why
 
-Even though SSH is a pretty good security guard for your doors and windows, it is still a visible door that bad-actors can see and try to brute-force in. [Fail2ban](#fail2ban-application-intrusion-detection-and-prevention) will monitor for these brute-force attempts but there is no such thing as being too secure. Requiring two factors adds an extra layer of security.
+Even though SSH is a pretty good security guard for your doors and windows, it is still a visible door that bad-actors can see and try to brute-force in. [Fail2ban](#application-intrusion-detection-and-prevention-with-fail2ban) will monitor for these brute-force attempts but there is no such thing as being too secure. Requiring two factors adds an extra layer of security.
 
 Using Two-Factor Authentication (2FA) / Multi-Factor Authentication (MFA) requires anyone entering to have **two** keys to enter which makes it harder for bad actors. The two keys are:
 
@@ -720,7 +739,8 @@ What we will do is tell the server's SSH PAM configuration to ask the user for t
 
 - Before you do this, you should have an idea of how 2FA/MFA works and you'll need an authenticator app on your phone to continue.
 - We'll use [google-authenticator-libpam](https://github.com/google/google-authenticator-libpam).
-- With the below configuration, a user will only need to enter their 2FA/MFA code if they are logging on with their password but **not** if they are using [SSH public/private keys](#ssh-publicprivate-keys). Check the documentation on how to change this behavior to suite your requirements.
+- With the below configuration, a user will only need to enter their 2FA/MFA code if they are logging on with their password but **not** if they are using [SSH public/private keys](#ssh-publicprivate-keys). If you want public key authentication to also require a TOTP code, configure `AuthenticationMethods` to require `keyboard-interactive` after `publickey`.
+- The `nullok` option lets users without a `~/.google_authenticator` file log in without a code. Remove `nullok` after all intended SSH users are enrolled if MFA must be mandatory for every account.
 
 #### References
 
@@ -810,20 +830,26 @@ What we will do is tell the server's SSH PAM configuration to ask the user for t
 1. Tell SSH to leverage it by adding or editing this line in `/etc/ssh/sshd_config`:
 
     ```
-    ChallengeResponseAuthentication yes
+    KbdInteractiveAuthentication yes
     ```
 
     [For the lazy](#editing-configuration-files---for-the-lazy):
 
     ``` bash
-    sudo sed -i -r -e "s/^(challengeresponseauthentication .*)$/# \1         # commented by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/I" /etc/ssh/sshd_config
-    echo -e "\nChallengeResponseAuthentication yes         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")" | sudo tee -a /etc/ssh/sshd_config
+    sudo sed -i -r -e "s/^(kbdinteractiveauthentication|challengeresponseauthentication)( .*)$/# \1\2         # commented by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/I" /etc/ssh/sshd_config
+    echo -e "\nKbdInteractiveAuthentication yes         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")" | sudo tee -a /etc/ssh/sshd_config
+    ```
+
+1. Validate the OpenSSH server configuration before restarting:
+
+    ``` bash
+    sudo sshd -t
     ```
 
 1. Restart ssh:
 
     ``` bash
-    sudo service sshd restart
+    sudo service ssh restart
     ```
 
 ([Table of Contents](#table-of-contents))
@@ -992,6 +1018,7 @@ Many security protocols leverage the time. If your system time is incorrect, it 
 #### How It Works
 
 NTP stands for Network Time Protocol. In the context of this guide, an NTP client on the server is used to update the server time with the official time pulled from official servers. Check https://www.pool.ntp.org/en/ for all of the public NTP servers.
+> **Note:** Starting with **Debian 13 (Trixie)**, the classic `ntp` package has been removed. Running `sudo apt install ntp` will fail with *"Package ntp has no installation candidate"*. Since this guide only uses NTP as a **client** (to sync the server's clock), the recommended approach on Debian 13+ is to use `systemd-timesyncd`, which is already pre-installed and requires no additional packages. See the [Debian 13+ steps](#debian-13-trixie-and-later-systemd-timesyncd) below.
 
 #### Goals
 
@@ -1007,6 +1034,76 @@ NTP stands for Network Time Protocol. In the context of this guide, an NTP clien
 
 #### Steps
 
+##### Debian 13 (Trixie) and later: systemd-timesyncd
+
+`systemd-timesyncd` is a lightweight SNTP client that is already included in Debian. Unlike the full `ntpd` daemon, it does not listen on any port, which makes it a smaller attack surface. For the purposes of this guide - keeping your server's clock in sync - it is all you need.
+
+1. Enable NTP synchronization:
+
+    ``` bash
+    sudo timedatectl set-ntp true
+    ```
+
+1. Verify it is working:
+
+    ``` bash
+    timedatectl status
+    ```
+
+    You should see `NTP service: active` and `System clock synchronized: yes` in the output.
+
+1. Configure trusted NTP servers. Make a backup of the configuration file and then edit it:
+
+    ``` bash
+    sudo cp --archive /etc/systemd/timesyncd.conf /etc/systemd/timesyncd.conf-COPY-$(date +"%Y%m%d%H%M%S")
+    ```
+
+    Edit `/etc/systemd/timesyncd.conf` and uncomment/set the `[Time]` section:
+
+    ```
+    [Time]
+    NTP=pool.ntp.org
+    FallbackNTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org
+    ```
+
+    [For the lazy](#editing-configuration-files---for-the-lazy):
+
+    ``` bash
+    sudo sed -i -r -e "s/^#?NTP=.*$/NTP=pool.ntp.org         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/" /etc/systemd/timesyncd.conf
+    sudo sed -i -r -e "s/^#?FallbackNTP=.*$/FallbackNTP=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/" /etc/systemd/timesyncd.conf
+    ```
+
+1. Restart the service to apply the changes:
+
+    ``` bash
+    sudo systemctl restart systemd-timesyncd
+    ```
+
+1. Check the synchronization status:
+
+    ``` bash
+    timedatectl timesync-status
+    ```
+
+    > ```
+    >        Server: 108.61.56.35 (pool.ntp.org)
+    > Poll interval: 32s (min: 32s; max: 34min 8s)
+    >          Leap: normal
+    >       Version: 4
+    >       Stratum: 2
+    >     Reference: C342F10A
+    >     Precision: 1us (2^0)
+    >  Root distance: 24.054ms (max: 5s)
+    >        Offset: +2.156ms
+    >         Delay: 48.567ms
+    >        Jitter: 1.452ms
+    >  Packet count: 3
+    > ```
+
+##### Debian 12 (Bookworm) and earlier: ntp package
+
+> **Note:** These steps apply to **Debian 12 and earlier** only. On Debian 13+, the `ntp` package is no longer available -- use the [systemd-timesyncd steps](#debian-13-trixie-and-later-systemd-timesyncd) above instead.
+
 1. Install ntp.
 
     On Debian based systems:
@@ -1018,7 +1115,7 @@ NTP stands for Network Time Protocol. In the context of this guide, an NTP clien
 1. Make a backup of the NTP client's configuration file `/etc/ntp.conf`:
 
     ``` bash
-    sudo cp --archive /etc/ntpsec/ntp.conf /etc/ntpsec/ntp.conf-COPY-$(date +"%Y%m%d%H%M%S")
+    sudo cp --archive /etc/ntp.conf /etc/ntp.conf-COPY-$(date +"%Y%m%d%H%M%S")
     ```
 
 1. The default configuration, at least on Debian, is already pretty secure. The only thing we'll want to make sure is we're the `pool` directive and not any `server` directives. The `pool` directive allows the NTP client to stop using a server if it is unresponsive or serving bad time. Do this by commenting out all `server` directives and adding the below to `/etc/ntp.conf`.
@@ -1192,7 +1289,7 @@ When there is a need to set or change an account password, the password task of 
     to this:
 
     ```
-    password        requisite                       pam_pwquality.so retry=3 minlen=10 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 maxrepeat=3 gecoschec
+    password        requisite                       pam_pwquality.so retry=3 minlen=10 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 maxrepeat=3 gecoscheck=1
     ```
 
    The above options are:
@@ -1205,13 +1302,13 @@ When there is a need to set or change an account password, the password task of 
        - `ocredit=-1` = must have at least **one non-alphanumeric character**
      - `difok=3` = at least 3 characters from the new password cannot have been in the old password
      - `maxrepeat=3` = allow a maximum of 3 repeated characters
-     - `gecoschec` = do not allow passwords with the account's name
+     - `gecoscheck=1` = do not allow passwords with the account's name
 
 
     [For the lazy](#editing-configuration-files---for-the-lazy):
     
     ``` bash
-    sudo sed -i -r -e "s/^(password\s+requisite\s+pam_pwquality.so)(.*)$/# \1\2         # commented by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")\n\1 retry=3 minlen=10 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 maxrepeat=3 gecoschec         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/" /etc/pam.d/common-password
+    sudo sed -i -r -e "s/^(password\s+requisite\s+pam_pwquality.so)(.*)$/# \1\2         # commented by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")\n\1 retry=3 minlen=10 difok=3 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1 maxrepeat=3 gecoscheck=1         # added by $(whoami) on $(date +"%Y-%m-%d @ %H:%M:%S")/" /etc/pam.d/common-password
     ```
 
 ([Table of Contents](#table-of-contents))
@@ -1296,9 +1393,10 @@ We will use unattended-upgrades to apply **critical security patches**. We can a
 
     // Automatically upgrade packages from these
     Unattended-Upgrade::Origins-Pattern {
-          "o=Debian,a=stable";
-          "o=Debian,a=stable-updates";
+          "origin=Debian,codename=${distro_codename},label=Debian";
+          "origin=Debian,codename=${distro_codename}-updates";
           "origin=Debian,codename=${distro_codename},label=Debian-Security";
+          "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
     };
 
     // You can specify your own packages to NOT automatically upgrade here
@@ -1577,10 +1675,11 @@ You can create rules by explicitly specifying the ports or with application conf
     sudo ufw default deny incoming comment 'deny all incoming traffic'
     ```
 
-1. Obviously we want SSH connections in:
+1. Obviously we want SSH connections in. Using limit instead of allow will automatically deny connections from an IP address if it attempts to initiate 6 or more connections within a 30-second window:
 
     ``` bash
-    sudo ufw limit in ssh comment 'allow SSH connections in'
+    SSH_PORT="$(sudo sshd -T | awk '/^port / { print $2; exit }')"
+    sudo ufw limit in "${SSH_PORT}/tcp" comment 'allow SSH connections in'
     ```
 
     > ```
@@ -1795,6 +1894,125 @@ sudo ufw allow plexmediaserver
 
 ([Table of Contents](#table-of-contents))
 
+### Docker And UFW
+
+#### Why
+
+Docker-published ports can be reachable even when UFW's incoming policy is `deny` and no UFW rule allows the port. This can expose a container service that you expected the host firewall to block. `ufw status` does not show rules created by Docker and is therefore not, by itself, a complete view of the host's network exposure.
+
+This section applies primarily to rootful Docker Engine containers using bridge networks. Host, macvlan, ipvlan, rootless, Swarm, and native nftables configurations have different network and firewall behavior and require their own review.
+
+#### How It Works
+
+Docker creates firewall and NAT rules on the host to provide bridge networking and port publishing. Incoming packets for a published port are DNATed to the container and traverse the host's `FORWARD` path and Docker chains instead of the `INPUT` rules normally managed by UFW. Container egress is also forwarded rather than traversing the host's usual `OUTPUT` path. As a result, Docker and UFW can apply conflicting policies, with Docker's rules effectively bypassing UFW for published container ports.
+
+For example, this publishes the container's TCP port 80 on port 8080 of every host address, including IPv4 and usually IPv6:
+
+``` bash
+docker run --publish 8080:80 nginx
+```
+
+Do not assume `sudo ufw deny 8080/tcp` makes that published port unreachable.
+
+#### Goals
+
+- publish only the ports that must be reachable outside a container network
+- bind private services to loopback instead of every host interface
+- explicitly filter container traffic that must be published externally
+- verify exposure from another host, not only with `ufw status`
+
+#### Safe Defaults
+
+1. Do not publish a port if only other containers need to reach it. Connect the containers to the same user-defined Docker network and use the container name and internal port instead.
+
+1. For services that should only be reachable from the Docker host, explicitly bind both IPv4 and IPv6 loopback addresses:
+
+    ``` bash
+    docker run \
+      --publish 127.0.0.1:8080:80 \
+      --publish '[::1]:8080:80' \
+      nginx
+    ```
+
+    The equivalent Docker Compose configuration is:
+
+    ``` yaml
+    services:
+      web:
+        image: nginx
+        ports:
+          - "127.0.0.1:8080:80"
+          - "[::1]:8080:80"
+    ```
+
+    > [!WARNING]
+    > Docker Engine releases older than 28.0.0 may allow hosts on the same layer-2 network to reach ports published to a loopback address. Upgrade Docker Engine rather than relying on loopback binding with an affected release.
+
+1. If a service must be remotely accessible, either place a host-based reverse proxy in front of a loopback-bound container or add an explicit policy before Docker's accept rules. With Docker's iptables firewall backend, user rules belong in the `DOCKER-USER` chain, not in Docker-managed chains or at the end of `FORWARD`.
+
+    The following example allows new connections to published containers from the documentation subnet `192.0.2.0/24` on `eth0`, while preserving established connections. Replace both values for your host before using it:
+
+    ``` bash
+    EXT_IF="eth0"
+    TRUSTED_NET="192.0.2.0/24"
+
+    sudo iptables -I DOCKER-USER 1 -i "$EXT_IF" \
+      -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    sudo iptables -I DOCKER-USER 2 -i "$EXT_IF" \
+      ! -s "$TRUSTED_NET" -j DROP
+    ```
+
+    These commands restrict IPv4 traffic only. If the host has IPv6 enabled, add an equivalent policy with `ip6tables`; otherwise, the published port may remain accessible over IPv6:
+
+    ``` bash
+    TRUSTED_NET6="2001:db8::/32"
+
+    sudo ip6tables -I DOCKER-USER 1 -i "$EXT_IF" \
+      -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    sudo ip6tables -I DOCKER-USER 2 -i "$EXT_IF" \
+      ! -s "$TRUSTED_NET6" -j DROP
+    ```
+
+    These commands restrict all Docker-published traffic arriving through that interface, not just one port. The example IPv4 and IPv6 ranges are reserved for documentation; replace them with networks you control. Rules entered interactively may not survive a reboot or firewall reload. Make them persistent using a mechanism that runs after Docker has created `DOCKER-USER`, then test that rule ordering remains correct. Matching the original host address or port after Docker's DNAT requires the `conntrack` extension; see Docker's firewall documentation before creating a narrower policy.
+
+    Docker's native nftables backend does not provide an iptables `DOCKER-USER` chain. Follow Docker's nftables documentation and create a separate nftables base chain with an appropriate hook and priority instead.
+
+1. Do not set Docker's `iptables` or `ip6tables` daemon options to `false` as a shortcut. Docker documents that this is unsuitable for most users: it is likely to break container networking and can leave container ports reachable on the local network unless you provide a complete replacement ruleset.
+
+#### Audit Published Ports
+
+List all running containers and their published addresses:
+
+``` bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+```
+
+Treat mappings containing `0.0.0.0` or `::` as potentially reachable through every corresponding host interface. Review Docker's IPv4 and IPv6 rules when the iptables backend is in use:
+
+``` bash
+sudo iptables -S DOCKER-USER
+sudo iptables -t nat -S DOCKER
+sudo ip6tables -S DOCKER-USER
+sudo ip6tables -t nat -S DOCKER
+```
+
+When Docker's native nftables backend is in use, inspect the complete nftables ruleset, including Docker's IPv4 and IPv6 tables and any separate table containing your policy:
+
+``` bash
+sudo nft list ruleset
+```
+
+Finally, scan or connect to each expected port from another machine on every relevant network. A local test and `ufw status` can miss the forwarding path used by Docker.
+
+#### References
+
+- https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw
+- https://docs.docker.com/engine/network/firewall-iptables/
+- https://docs.docker.com/engine/network/firewall-nftables/
+- https://docs.docker.com/engine/network/port-publishing/
+
+([Table of Contents](#table-of-contents))
+
 ### iptables Intrusion Detection And Prevention with PSAD
 
 #### Why
@@ -1807,7 +2025,7 @@ I can't explain it any better than user [FINESEC](https://serverfault.com/users/
 
 > Fail2BAN scans log files of various applications such as apache, ssh or ftp and automatically bans IPs that show the malicious signs such as automated login attempts. PSAD on the other hand scans iptables and ip6tables log messages (typically /var/log/messages) to detect and optionally block scans and other types of suspect traffic such as DDoS or OS fingerprinting attempts. It's ok to use both programs at the same time because they operate on different level.
 
-And, since we're already using [UFW](#ufw-uncomplicated-firewall) so we'll follow the awesome instructions by [netson](https://gist.github.com/netson) at https://gist.github.com/netson/c45b2dc4e835761fbccc to make PSAD work with UFW.
+And, since we're already using [UFW](#firewall-with-ufw-uncomplicated-firewall) so we'll follow the awesome instructions by [netson](https://gist.github.com/netson) at https://gist.github.com/netson/c45b2dc4e835761fbccc to make PSAD work with UFW.
 
 #### References
 
@@ -1870,7 +2088,7 @@ And, since we're already using [UFW](#ufw-uncomplicated-firewall) so we'll follo
     -A FORWARD -j LOG --log-tcp-options --log-prefix "[IPTABLES] "
     ```
 
-    **Note**: We're adding a log prefix to all the iptables logs. We'll need this for [seperating iptables logs to their own file](#ns-separate-iptables-log-file).
+    **Note**: We're adding a log prefix to all the iptables logs. We'll need this for [separating iptables logs to their own file](#separate-iptables-log-file).
 
     For example:
 
@@ -2098,6 +2316,192 @@ fail2ban-client set sshd unbanip 192.168.1.100
 ```
 
 ([Table of Contents](#table-of-contents))
+
+### Application Intrusion Detection And Prevention With CrowdSec
+
+#### Why
+
+UFW tells your server what doors to board up so nobody can see them, and what doors to allow authorized users through. PSAD monitors network activity to detect and prevent potential intrusions -- repeated attempts to get in. 
+
+CrowdSec is similar to Fail2Ban in that it monitors the logs of your applications (like SSH and Apache) to detect and prevent potential intrusions. However, CrowdSec is coupled with a community that shares threat intelligence back to CrowdSec to then distribute a Community Blocklist to all users.
+
+#### How It Works
+
+CrowdSec monitors the logs of your applications (like SSH and Apache) to detect and prevent potential intrusions. It will monitor network traffic/logs and prevent intrusions by blocking suspicious activity (e.g. multiple successive failed connections in a short time-span). Once a malicious IP is detected, it will be added to your local decision list and threat information is shared with CrowdSec to update the Community Blocklist on malicious IP addresses. Once an IP address hits a certain threshold of malicious activity, it will be automatically propogated to all other CrowdSec users to proactively block.
+
+#### Goals
+
+- network monitoring for suspicious activity with automatic banning of offending IPs
+
+#### Notes
+
+- As of right now, the only thing running on this server is SSH so we'll want CrowdSec to monitor SSH and ban as necessary.
+- As you install other programs, you'll need to install additional collections and configure the appropriate acquisitions.
+
+#### References
+
+- https://www.crowdsec.net/
+- [Read how CrowdSec curates the Community Blocklist](https://www.crowdsec.net/our-data)
+- [Read what threat intelligence is shared with CrowdSec](https://docs.crowdsec.net/docs/next/central_api/intro#signal-meta-data)
+- https://docs.crowdsec.net/
+
+#### Steps
+
+1. Install CrowdSec Security Engine. (IDS)
+
+    On any linux distro (including Debian based systems)
+    
+    Install the CrowdSec repository:
+    ``` bash
+    curl -s https://install.crowdsec.net | sudo sh
+    ```
+
+    Install the CrowdSec Security Engine:
+    ``` bash
+    sudo apt install crowdsec
+    ```
+
+> [!TIP]
+> if `curl | sh` is not your thing, you can find additional install methods [here](https://docs.crowdsec.net/u/getting_started/installation/linux).
+
+By default whilst CrowdSec is installing the Security Engine it will auto-discover your installed applications and install the appropriate parsers and scenarios for them. Since we know most Linux servers are running ssh out of the box CrowdSec will automatically configured this for you.
+
+2. Install a Remediation Component. (IPS)
+
+    CrowdSec by itself is a detection engine, since in most modern infrastructures you may have an upstream firewall or WAF, CrowdSec will not block the IP addresses by itself. You can install a Remediation Component to block the IP addresses detected by CrowdSec.
+    ```bash
+    sudo apt install crowdsec-firewall-bouncer-iptables
+    ```
+
+> [!TIP]
+> If your installation of UFW is not using `iptables` as the backend, you can alternatively install `crowdsec-firewall-bouncer-nftables`. There is no difference in the installed binaries, only the configuration file is different.
+
+By default whilst the Remediation Component is installing it will auto-configure the necessary settings to work with the Security Engine if deployed on the same host (and if the security engine is not within a container environment).
+
+3. Check detection and remediation is working as intended:
+
+    CrowdSec package comes with a CLI tool to check the status of the Security Engine and the Remediation Component.
+
+    ```bash
+    sudo cscli metrics
+    ```
+
+    ```bash
+    Acquisition Metrics:
+    ╭────────────────────────┬────────────┬──────────────┬────────────────┬────────────────────────┬───────────────────╮
+    │ Source                 │ Lines read │ Lines parsed │ Lines unparsed │ Lines poured to bucket │ Lines whitelisted │
+    ├────────────────────────┼────────────┼──────────────┼────────────────┼────────────────────────┼───────────────────┤
+    │ file:/var/log/auth.log │ 5          │ 4            │ 1              │ 10                     │ -                 │
+    │ file:/var/log/syslog   │ 30         │ -            │ 30             │ -                      │ -                 │
+    ╰────────────────────────┴────────────┴──────────────┴────────────────┴────────────────────────┴───────────────────╯
+
+    Local API Decisions:
+    ╭────────────────────────────────────────────┬────────┬────────┬───────╮
+    │ Reason                                     │ Origin │ Action │ Count │
+    ├────────────────────────────────────────────┼────────┼────────┼───────┤
+    │ crowdsecurity/http-backdoors-attempts      │ CAPI   │ ban    │ 73    │
+    │ crowdsecurity/http-bad-user-agent          │ CAPI   │ ban    │ 4836  │
+    │ crowdsecurity/http-path-traversal-probing  │ CAPI   │ ban    │ 87    │
+    │ crowdsecurity/http-probing                 │ CAPI   │ ban    │ 2010  │
+    │ crowdsecurity/thinkphp-cve-2018-20062      │ CAPI   │ ban    │ 88    │
+    │ crowdsecurity/CVE-2019-18935               │ CAPI   │ ban    │ 7     │
+    │ crowdsecurity/CVE-2023-49103               │ CAPI   │ ban    │ 5     │
+    │ crowdsecurity/http-admin-interface-probing │ CAPI   │ ban    │ 91    │
+    │ ltsich/http-w00tw00t                       │ CAPI   │ ban    │ 3     │
+    │ crowdsecurity/apache_log4j2_cve-2021-44228 │ CAPI   │ ban    │ 18    │
+    │ crowdsecurity/nginx-req-limit-exceeded     │ CAPI   │ ban    │ 280   │
+    │ crowdsecurity/ssh-slow-bf                  │ CAPI   │ ban    │ 3412  │
+    │ crowdsecurity/spring4shell_cve-2022-22965  │ CAPI   │ ban    │ 1     │
+    │ crowdsecurity/ssh-cve-2024-6387            │ CAPI   │ ban    │ 24    │
+    │ crowdsecurity/CVE-2023-22515               │ CAPI   │ ban    │ 2     │
+    │ crowdsecurity/http-cve-2021-41773          │ CAPI   │ ban    │ 172   │
+    │ crowdsecurity/netgear_rce                  │ CAPI   │ ban    │ 14    │
+    │ crowdsecurity/ssh-bf                       │ CAPI   │ ban    │ 2000  │
+    │ crowdsecurity/CVE-2022-35914               │ CAPI   │ ban    │ 1     │
+    │ crowdsecurity/http-cve-2021-42013          │ CAPI   │ ban    │ 2     │
+    │ crowdsecurity/jira_cve-2021-26086          │ CAPI   │ ban    │ 9     │
+    │ crowdsecurity/http-sensitive-files         │ CAPI   │ ban    │ 166   │
+    │ crowdsecurity/http-wordpress-scan          │ CAPI   │ ban    │ 272   │
+    │ crowdsecurity/CVE-2022-26134               │ CAPI   │ ban    │ 5     │
+    │ crowdsecurity/http-generic-bf              │ CAPI   │ ban    │ 7     │
+    │ crowdsecurity/http-open-proxy              │ CAPI   │ ban    │ 948   │
+    │ crowdsecurity/http-crawl-non_statics       │ CAPI   │ ban    │ 339   │
+    │ crowdsecurity/http-cve-probing             │ CAPI   │ ban    │ 5     │
+    │ crowdsecurity/CVE-2017-9841                │ CAPI   │ ban    │ 117   │
+    │ crowdsecurity/CVE-2022-37042               │ CAPI   │ ban    │ 1     │
+    │ crowdsecurity/fortinet-cve-2018-13379      │ CAPI   │ ban    │ 5     │
+    ╰────────────────────────────────────────────┴────────┴────────┴───────╯
+
+    Local API Metrics:
+    ╭──────────────────────┬────────┬──────╮
+    │ Route                │ Method │ Hits │
+    ├──────────────────────┼────────┼──────┤
+    │ /v1/alerts           │ GET    │ 2    │
+    │ /v1/decisions/stream │ GET    │ 5    │
+    │ /v1/usage-metrics    │ POST   │ 2    │
+    │ /v1/watchers/login   │ POST   │ 4    │
+    ╰──────────────────────┴────────┴──────╯
+
+    Local API Bouncers Metrics:
+    ╭────────────────────────────────┬──────────────────────┬────────┬──────╮
+    │ Bouncer                        │ Route                │ Method │ Hits │
+    ├────────────────────────────────┼──────────────────────┼────────┼──────┤
+    │ cs-firewall-bouncer-1729025592 │ /v1/decisions/stream │ GET    │ 5    │
+    ╰────────────────────────────────┴──────────────────────┴────────┴──────╯
+
+    Local API Machines Metrics:
+    ╭──────────────────────────────────────────────────┬────────────┬────────┬──────╮
+    │ Machine                                          │ Route      │ Method │ Hits │
+    ├──────────────────────────────────────────────────┼────────────┼────────┼──────┤
+    │ <your_machine_id_will_be_here>                   │ /v1/alerts │ GET    │ 2    │
+    ╰──────────────────────────────────────────────────┴────────────┴────────┴──────╯
+
+    Parser Metrics:
+    ╭─────────────────────────────────┬──────┬────────┬──────────╮
+    │ Parsers                         │ Hits │ Parsed │ Unparsed │
+    ├─────────────────────────────────┼──────┼────────┼──────────┤
+    │ child-crowdsecurity/sshd-logs   │ 41   │ 4      │ 37       │
+    │ child-crowdsecurity/syslog-logs │ 35   │ 35     │ -        │
+    │ crowdsecurity/dateparse-enrich  │ 4    │ 4      │ -        │
+    │ crowdsecurity/sshd-logs         │ 5    │ 4      │ 1        │
+    │ crowdsecurity/syslog-logs       │ 35   │ 35     │ -        │
+    ╰─────────────────────────────────┴──────┴────────┴──────────╯
+
+    Scenario Metrics:
+    ╭─────────────────────────────────────┬───────────────┬───────────┬──────────────┬────────┬─────────╮
+    │ Scenario                            │ Current Count │ Overflows │ Instantiated │ Poured │ Expired │
+    ├─────────────────────────────────────┼───────────────┼───────────┼──────────────┼────────┼─────────┤
+    │ crowdsecurity/ssh-bf                │ 1             │ -         │ 1            │ 4      │ -       │
+    │ crowdsecurity/ssh-bf_user-enum      │ 1             │ -         │ 1            │ 1      │ -       │
+    │ crowdsecurity/ssh-slow-bf           │ 1             │ -         │ 1            │ 4      │ -       │
+    │ crowdsecurity/ssh-slow-bf_user-enum │ 1             │ -         │ 1            │ 1      │ -       │
+    ╰─────────────────────────────────────┴───────────────┴───────────┴──────────────┴────────┴─────────╯
+    ```
+
+The above output can be daunting, but it's a good way to check that the Security Engine is reading logs and the Remediation Component is blocking IP addresses. So a quick breakdown of each section:
+
+- **Acquisition Metrics**: This section shows the logs that the Security Engine is reading and parsing. If you see logs in the `Lines unparsed` column, it means the Security Engine is not able to parse the logs. This could be due to a misconfiguration or the logs are not in the expected format.
+- **Local API Decisions**: This section shows the decisions that the Security Engine has within the datbase. If you see logs in the `Count` column, it means the Security Engine has detected malicious activity and has blocked the IP address.
+    - Orgin: This is where the decision came from. In this case, it's from the Central API (CAPI).
+- **Local API Metrics**: This section shows the number of hits to the Local API. This is the API that the Security Engine uses to communicate with the Remediation Component.
+- **Local API Bouncers Metrics**: This section shows the number of hits to the Local API by the Remediation Component.
+- **Local API Machines Metrics**: This section shows the number of hits to the Local API by the Security Engine (if you run multiple Security Engine in a centralized setup you can see multiple ID's here).
+- **Parser Metrics**: This section shows the parsers that are being used by the Security Engine. If you see logs in the `Unparsed` column, it means the Security Engine is not able to parse the logs. This could be due to a misconfiguration or the logs are not in the expected format.
+- **Scenario Metrics**: This section shows the scenarios that are being used by the Security Engine. If you see logs in the `Current Count` column, it means the Security Engine has detected malicious activity and is tracking the IP address.
+
+#### Unban an IP
+
+To unban an IP use this command:
+
+``` bash
+cscli decisions delete --ip [IP]
+```
+
+`[IP]` is the IP address you want to unban. For example, to unban `192.168.1.100` from SSH you would do:
+
+``` bash
+cscli decisions delete --ip 192.168.1.100
+```
 
 ## The Auditing
 
@@ -2767,11 +3171,12 @@ From [https://cisofy.com/lynis/](https://cisofy.com/lynis/):
     On Debian based systems, using CISOFY's community software repository:
 
     ``` bash
-    sudo apt install apt-transport-https ca-certificates host
-    sudo wget -O - https://packages.cisofy.com/keys/cisofy-software-public.key | sudo apt-key add -
-    sudo echo "deb https://packages.cisofy.com/community/lynis/deb/ stable main" | sudo tee /etc/apt/sources.list.d/cisofy-lynis.list
-    sudo apt update
-    sudo apt install lynis host
+	sudo apt install ca-certificates host
+	sudo mkdir -p /etc/apt/keyrings
+	wget -O - https://packages.cisofy.com/keys/cisofy-software-public.key | sudo gpg --dearmor -o /etc/apt/keyrings/cisofy-lynis.gpg
+	echo "deb [signed-by=/etc/apt/keyrings/cisofy-lynis.gpg] https://packages.cisofy.com/community/lynis/deb/ stable main" | sudo tee /etc/apt/sources.list.d/cisofy-lynis.list
+	sudo apt update
+	sudo apt install lynis
     ```
 
 1. Update it:
@@ -3247,7 +3652,6 @@ Keep in mind, deborphan finds packages that have **no package dependencies**. Th
 ## The Miscellaneous
 
 ### The Simple way with MSMTP
-(#msmtp-alternative)
 #### Why
 
 Well I will SIMPLIFY this method, to only output email using Google Mail account (and others). True Simple! :)
@@ -3292,8 +3696,6 @@ Well I will SIMPLIFY this method, to only output email using Google Mail account
     #tls_key_file [file]
     #tls_cert_file [file]
     tls_certcheck on
-    tls_force_sslv3 on
-    tls_min_dh_prime_bits 512
     #tls_priorities [priorities]
     #dsn_notify (off|condition)
     #dsn_return (off|amount)
@@ -3527,7 +3929,7 @@ Also, as discussed in [issue #29](https://github.com/imthenachoman/How-To-Secure
     sudo service exim4 restart
     ```
 
-1. If you're using [UFW](#ufw-uncomplicated-firewall), you'll need to allow outbound traffic on 465. To do this we'll create a custom UFW application profile and then enable it. Create the file `/etc/ufw/applications.d/smtptls`, add this, then run `ufw allow out smtptls comment 'open TLS port 465 for use with SMPT to send e-mails'`:
+1. If you're using [UFW](#firewall-with-ufw-uncomplicated-firewall), you'll need to allow outbound traffic on 465. To do this we'll create a custom UFW application profile and then enable it. Create the file `/etc/ufw/applications.d/smtptls`, add this, then run `ufw allow out smtptls comment 'open TLS port 465 for use with SMPT to send e-mails'`:
 
     ```
     [SMTPTLS]
